@@ -7,7 +7,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# টেলিগ্রাম ক্রেডেনশিয়ালস
+# Telegram Credentials
 TELEGRAM_BOT_TOKEN = "8743022961:AAHyGe2Kf8RWUhIpKEJ4QbDmvJdfphZPFDM"
 CHAT_ID = "7786764916"
 
@@ -28,7 +28,8 @@ def run_scanner():
                 if ticker['quoteVolume'] > 1000000: 
                     hl_pairs.append({'symbol': symbol, 'volume': ticker['quoteVolume']})
         hl_pairs = sorted(hl_pairs, key=lambda x: x['volume'], reverse=True)
-        top_symbols = [x['symbol'] for x in hl_pairs[:50]]
+        # আপডেটেড: এখন টপ ১০০টি কয়েন স্ক্যান করবে
+        top_symbols = [x['symbol'] for x in hl_pairs[:100]]
     except Exception as e:
         return jsonify({"error": f"Failed to fetch markets: {e}"})
 
@@ -42,10 +43,10 @@ def run_scanner():
             
             df_5m = pd.DataFrame(bars_5m, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
             
-            c1 = df_5m.iloc[-5]  
-            c2 = df_5m.iloc[-4]  
-            c3 = df_5m.iloc[-3]  
-            c4 = df_5m.iloc[-2]  
+            # C4 (4th Candle) এর ওপেনে ডাইরেক্ট এন্ট্রি
+            c1 = df_5m.iloc[-4]  # Momentum
+            c2 = df_5m.iloc[-3]  # Doji / Base
+            c3 = df_5m.iloc[-2]  # Breakout (Just Closed)
 
             def get_metrics(c):
                 r = c['high'] - c['low']
@@ -58,38 +59,47 @@ def run_scanner():
             
             if c1_range == 0 or c2_range == 0 or c3_range == 0: continue
 
-            # Pattern Math
+            # =======================================================
+            # STEP 1: CORE PATTERN (DIRECT BREAKOUT ENTRY)
+            # =======================================================
+            # 1. C1 Momentum (45% body)
             is_bull_c1 = (c1['close'] > c1['open']) and (c1_body >= c1_range * 0.45)
             is_bear_c1 = (c1['close'] < c1['open']) and (c1_body >= c1_range * 0.45)
             
-            is_doji = (c2_body <= c2_range * 0.35) and (c2['high'] <= c1['high']) and (c2['low'] >= c1['low'])
+            # 2. C2 Doji (35% body) - Position flexible (Inside or Above/Below)
+            is_doji_body = (c2_body <= c2_range * 0.35) 
+            bull_doji_pos = c2['close'] >= c1['low']  # Doji inside or above C1
+            bear_doji_pos = c2['close'] <= c1['high'] # Doji inside or below C1
             
-            is_bull_c3 = (c3['close'] > c3['open']) and (c3_body >= c3_range * 0.45)
-            is_bear_c3 = (c3['close'] < c3['open']) and (c3_body >= c3_range * 0.45)
-            strong_c3 = c3_range >= (c1_range * 0.60)
+            # 3. C3 Breakout (45% body, MUST close above/below BOTH Doji and C1)
+            is_bull_c3 = (c3['close'] > c3['open']) and (c3_body >= c3_range * 0.45) and (c3['close'] > c2['high']) and (c3['close'] > c1['high'])
+            is_bear_c3 = (c3['close'] < c3['open']) and (c3_body >= c3_range * 0.45) and (c3['close'] < c2['low']) and (c3['close'] < c1['low'])
 
-            bull_breakout = is_bull_c1 and is_doji and is_bull_c3 and strong_c3 and (c3['close'] > c2['high'])
-            bear_breakout = is_bear_c1 and is_doji and is_bear_c3 and strong_c3 and (c3['close'] < c2['low'])
+            bull_breakout = is_bull_c1 and is_doji_body and bull_doji_pos and is_bull_c3
+            bear_breakout = is_bear_c1 and is_doji_body and bear_doji_pos and is_bear_c3
 
             if not (bull_breakout or bear_breakout): continue 
 
-            bull_retest = bull_breakout and (c4['low'] <= c2['high'] * 1.002) and (c4['close'] > c2['high'])
-            bear_retest = bear_breakout and (c4['high'] >= c2['low'] * 0.998) and (c4['close'] < c2['low'])
+            # =======================================================
+            # STEP 2: FRESHNESS CHECK
+            # =======================================================
+            # C3 ক্লোজ হওয়ার ৫.৫ মিনিটের মধ্যে সিগন্যাল থ্রো করবে 
+            c3_close_time = c3['time'] + (5 * 60 * 1000)
+            time_since_c3_close = (current_time_ms - c3_close_time) / (1000 * 60)
+            if time_since_c3_close > 5.5: continue
 
-            if not (bull_retest or bear_retest): continue
-
-            c4_close_time = c4['time'] + (5 * 60 * 1000)
-            time_since_c4_close = (current_time_ms - c4_close_time) / (1000 * 60)
-            if time_since_c4_close > 5.5: continue
-
+            # =======================================================
+            # STEP 3: ADVANCED CONFIRMATIONS (ATR, VOL, MTF)
+            # =======================================================
             df_5m['prev_close'] = df_5m['close'].shift(1)
             df_5m['tr1'] = df_5m['high'] - df_5m['low']
             df_5m['tr2'] = abs(df_5m['high'] - df_5m['prev_close'])
             df_5m['tr3'] = abs(df_5m['low'] - df_5m['prev_close'])
             df_5m['tr'] = df_5m[['tr1', 'tr2', 'tr3']].max(axis=1)
+            
             atr_5m = df_5m['tr'].rolling(14).mean().iloc[-2] 
 
-            vol_avg = df_5m['volume'].iloc[-23:-3].mean() 
+            vol_avg = df_5m['volume'].iloc[-22:-2].mean() 
             volume_ok = c3['volume'] >= (vol_avg * 1.2)
 
             def check_mtf(tf):
@@ -108,11 +118,15 @@ def run_scanner():
             is_15m_bull, is_15m_bear = check_mtf('15m')
             is_1h_bull, is_1h_bear = check_mtf('1h')
 
+            # =======================================================
+            # STEP 4: SCORING MODEL
+            # =======================================================
             score = 50 
+            
             if volume_ok: score += 10
             if atr_5m > (c2_range * 0.5): score += 10 
 
-            is_long = bull_retest
+            is_long = bull_breakout
             if is_long:
                 if is_15m_bull: score += 15
                 if is_1h_bull: score += 15
@@ -122,7 +136,10 @@ def run_scanner():
 
             if score < 30: continue
 
-            entry_price = c4['close']
+            # =======================================================
+            # STEP 5: ALERTS & DIRECT ENTRY
+            # =======================================================
+            entry_price = c3['close'] # C4 Open / Direct Entry
             clean_name = symbol.split('/')[0]
             trade_link = f"https://app.hyperliquid.xyz/trade/{clean_name}"
 
@@ -134,17 +151,17 @@ def run_scanner():
                 risk_pct = round((risk / entry_price) * 100, 2)
                 
                 alerts.append(
-                    f"🥪 *PRO SANDWICH — LONG*\n\n"
+                    f"🥪 *PRO SANDWICH (Direct Entry) — LONG*\n\n"
                     f"🪙 *{clean_name}* [Trade]({trade_link})\n"
                     f"⭐ *Score:* `{score}/100` (Grade: {'A+' if score>=90 else 'A' if score>=80 else 'B' if score>=50 else 'C'})\n\n"
                     f"📊 *Confluence*\n"
                     f"• 1H: {'🟢 Bull' if is_1h_bull else '⚪ Neutral'}\n"
                     f"• 15M: {'🟢 Bull' if is_15m_bull else '⚪ Neutral'}\n"
                     f"• Vol (C3): {round(c3['volume']/vol_avg, 2)}x Avg\n\n"
-                    f"💰 *Entry (C4 Close):* `{round(entry_price, 4)}`\n"
+                    f"💰 *Entry (4th Cdl Open):* `{round(entry_price, 4)}`\n"
                     f"🛑 *SL:* `{round(sl, 4)}`\n"
                     f"🎯 *TP1:* `{round(tp1, 4)}` | *TP2:* `{round(tp2, 4)}`\n\n"
-                    f"⚖️ *Risk:* `{risk_pct}%` | 📐 *R:R:* `1:2.5`"
+                    f"⚖ *Risk:* `{risk_pct}%` | 📐 *R:R:* `1:2.5`"
                 )
             else:
                 sl = c1['high'] + (atr_5m * 0.5)
@@ -154,14 +171,14 @@ def run_scanner():
                 risk_pct = round((risk / entry_price) * 100, 2)
                 
                 alerts.append(
-                    f"🥪 *PRO SANDWICH — SHORT*\n\n"
+                    f"🥪 *PRO SANDWICH (Direct Entry) — SHORT*\n\n"
                     f"🪙 *{clean_name}* [Trade]({trade_link})\n"
                     f"⭐ *Score:* `{score}/100` (Grade: {'A+' if score>=90 else 'A' if score>=80 else 'B' if score>=50 else 'C'})\n\n"
                     f"📊 *Confluence*\n"
                     f"• 1H: {'🔴 Bear' if is_1h_bear else '⚪ Neutral'}\n"
                     f"• 15M: {'🔴 Bear' if is_15m_bear else '⚪ Neutral'}\n"
                     f"• Vol (C3): {round(c3['volume']/vol_avg, 2)}x Avg\n\n"
-                    f"💰 *Entry (C4 Close):* `{round(entry_price, 4)}`\n"
+                    f"💰 *Entry (4th Cdl Open):* `{round(entry_price, 4)}`\n"
                     f"🛑 *SL:* `{round(sl, 4)}`\n"
                     f"🎯 *TP1:* `{round(tp1, 4)}` | *TP2:* `{round(tp2, 4)}`\n\n"
                     f"⚖️ *Risk:* `{risk_pct}%` | 📐 *R:R:* `1:2.5`"
@@ -179,7 +196,7 @@ def run_scanner():
         }, timeout=10) 
         return jsonify({"status": "Success", "signals": len(alerts)})
     else:
-        return jsonify({"status": "Scanned 50 coins. No setups found."})
+        return jsonify({"status": "Scanned 100 coins. No setups found."})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
